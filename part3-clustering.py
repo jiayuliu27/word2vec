@@ -1,8 +1,14 @@
+import logging
+import re
+import time
 import pandas as pd
 import numpy as np
-# Import various modules for string cleaning
+
 from bs4 import BeautifulSoup
-import re
+from gensim.models import word2vec
+from sklearn.cluster import KMeans
+from sklearn.ensemble import RandomForestClassifier
+
 from nltk.corpus import stopwords
 import nltk.data # download the punkt tokenizer for sentence splitting
 nltk.download()
@@ -10,6 +16,10 @@ nltk.download()
 
 # Load the punkt tokenizer
 tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+
+labeledData = "data/labeledTrainData.tsv"
+unlabeledData = "data/unlabeledTrainData.tsv"
+testData = "data/isoData.tsv"
 
 # Define a function to split a review into parsed sentences
 def review_to_sentences( review, tokenizer, remove_stopwords=False ):
@@ -25,8 +35,7 @@ def review_to_sentences( review, tokenizer, remove_stopwords=False ):
         # If a sentence is empty, skip it
         if len(raw_sentence) > 0:
             # Otherwise, call review_to_wordlist to get a list of words
-            sentences.append( review_to_wordlist( raw_sentence, \
-              remove_stopwords ))
+            sentences.append( review_to_wordlist( raw_sentence, remove_stopwords ))
     #
     # Return the list of sentences (each sentence is a list of words,
     # so this returns a list of lists
@@ -86,12 +95,32 @@ def getAvgFeatureVecs(reviews, model, num_features):
         counter = counter + 1
     return reviewFeatureVecs
 
+def create_bag_of_centroids( wordlist, word_centroid_map ):
+    #
+    # The number of clusters is equal to the highest cluster index
+    # in the word / centroid map
+    num_centroids = max( word_centroid_map.values() ) + 1
+    #
+    # Pre-allocate the bag of centroids vector (for speed)
+    bag_of_centroids = np.zeros( num_centroids, dtype="float32" )
+    #
+    # Loop over the words in the review. If the word is in the vocabulary,
+    # find which cluster it belongs to, and increment that cluster count 
+    # by one
+    for word in wordlist:
+        if word in word_centroid_map:
+            index = word_centroid_map[word]
+            bag_of_centroids[index] += 1
+    #
+    # Return the "bag of centroids"
+    return bag_of_centroids
+
 
 # Read data from files 
-train = pd.read_csv( "data/labeledTrainData.tsv", header=0, 
+train = pd.read_csv( labeledData, header=0, 
  delimiter="\t", quoting=3, encoding="utf8" )
-test = pd.read_csv( "data/testData.tsv", header=0, delimiter="\t", quoting=3, encoding="utf8"  )
-unlabeled_train = pd.read_csv( "data/unlabeledTrainData.tsv", header=0, 
+test = pd.read_csv( testData, header=0, delimiter="\t", quoting=3, encoding="utf8"  )
+unlabeled_train = pd.read_csv( unlabeledData, header=0, 
  delimiter="\t", quoting=3, encoding="utf8"  )
 
 # Verify the number of reviews that were read (100,000 in total)
@@ -114,7 +143,7 @@ for review in unlabeled_train["review"]:
 
 # Import the built-in logging module and configure it so that Word2Vec 
 # creates nice output messages
-import logging
+
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
 
 # Set values for various parameters
@@ -125,7 +154,7 @@ context = 10          # Context window size
 downsampling = 1e-3   # Downsample setting for frequent words
 
 # Initialize and train the model (this will take some time)
-from gensim.models import word2vec
+
 print("Training model...")
 model = word2vec.Word2Vec(sentences, workers=num_workers, 
             size=num_features, min_count = min_word_count, 
@@ -140,12 +169,6 @@ model.init_sims(replace=True)
 model_name = "300features_40minwords_10context"
 model.save(model_name)
 
-# print(model.doesnt_match("man woman child kitchen".split()))
-# print(model.doesnt_match("france england germany berlin".split()))
-# print(model.doesnt_match("paris berlin london austria".split()))
-# print(model.most_similar("man"))
-# print(model.most_similar("queen"))
-# print(model.most_similar("awful"))
 '''
 Calculate average feature vectors for training and testing sets, using the functions we defined above. Notice that we now use stop word removal
 '''
@@ -162,8 +185,6 @@ for review in test["review"]:
 
 testDataVecs = getAvgFeatureVecs(clean_test_reviews, model, num_features)
 
-from sklearn.cluster import KMeans
-import time
 
 start = time.time() # Start time
 
@@ -185,48 +206,23 @@ print("Time taken for K Means clustering: ", elapsed, "seconds.")
 # a cluster number                                                                                            
 word_centroid_map = dict(zip( model.index2word, idx ))
 
-def create_bag_of_centroids( wordlist, word_centroid_map ):
-    #
-    # The number of clusters is equal to the highest cluster index
-    # in the word / centroid map
-    num_centroids = max( word_centroid_map.values() ) + 1
-    #
-    # Pre-allocate the bag of centroids vector (for speed)
-    bag_of_centroids = np.zeros( num_centroids, dtype="float32" )
-    #
-    # Loop over the words in the review. If the word is in the vocabulary,
-    # find which cluster it belongs to, and increment that cluster count 
-    # by one
-    for word in wordlist:
-        if word in word_centroid_map:
-            index = word_centroid_map[word]
-            bag_of_centroids[index] += 1
-    #
-    # Return the "bag of centroids"
-    return bag_of_centroids
-
 # Pre-allocate an array for the training set bags of centroids (for speed)
-train_centroids = np.zeros( (train["review"].size, num_clusters), \
-    dtype="float32" )
+train_centroids = np.zeros( (train["review"].size, num_clusters), dtype="float32" )
 
 # Transform the training set reviews into bags of centroids
 counter = 0
 for review in clean_train_reviews:
-    train_centroids[counter] = create_bag_of_centroids( review, \
-        word_centroid_map )
+    train_centroids[counter] = create_bag_of_centroids( review, word_centroid_map )
     counter += 1
 
 # Repeat for test reviews 
-test_centroids = np.zeros(( test["review"].size, num_clusters), \
-    dtype="float32" )
+test_centroids = np.zeros(( test["review"].size, num_clusters), dtype="float32" )
 
 counter = 0
 for review in clean_test_reviews:
-    test_centroids[counter] = create_bag_of_centroids( review, \
-        word_centroid_map )
+    test_centroids[counter] = create_bag_of_centroids( review, word_centroid_map )
     counter += 1
 
-from sklearn.ensemble import RandomForestClassifier
 # Fit a random forest and extract predictions 
 forest = RandomForestClassifier(n_estimators = 100)
 
